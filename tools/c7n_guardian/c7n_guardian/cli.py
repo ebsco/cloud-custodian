@@ -15,6 +15,7 @@
 import datetime
 import logging
 import operator
+import time
 
 import boto3
 from botocore.exceptions import ClientError
@@ -196,7 +197,9 @@ def enable(config, master, tags, accounts, debug, message, region):
     """enable guard duty on a set of accounts"""
     accounts_config, master_info, executor = guardian_init(
         config, debug, master, accounts, tags)
+    
     regions = expand_regions(region)
+    
     for r in regions:
         log.info("Processing Region:%s", r)
         enable_region(master_info, accounts_config, executor, message, r)
@@ -210,6 +213,7 @@ def enable_region(master_info, accounts_config, executor, message, region):
 
     master_client = master_session.client('guardduty')
     detector_id = get_or_create_detector_id(master_client)
+    ip_set = get_or_create_ip_set(master_client, detector_id, master_info.get('trustedIP'))
 
     results = master_client.get_paginator(
         'list_members').paginate(DetectorId=detector_id, OnlyAssociated="FALSE")
@@ -288,7 +292,7 @@ def enable_region(master_info, accounts_config, executor, message, region):
                if account['account_id'] not in active_ids]
 
     log.info("Region:%s Accepting %d invitations in members", region, len(members))
-
+   
     with executor(max_workers=WORKER_COUNT) as w:
         futures = {}
         for a in accounts_config['accounts']:
@@ -296,6 +300,7 @@ def enable_region(master_info, accounts_config, executor, message, region):
                 continue
             if a['account_id'] in active_ids:
                 continue
+            time.sleep(5)
             futures[w.submit(enable_account, a, master_info['account_id'], region)] = a
 
         for f in as_completed(futures):
@@ -315,7 +320,7 @@ def enable_account(account, master_account_id, region):
         profile=account.get('profile'),
         region=region)
     member_client = member_session.client('guardduty')
-    m_detector_id = get_or_create_detector_id(member_client)
+    m_detector_id = get_or_create_detector_id(member_client)    
     all_invitations = member_client.list_invitations().get('Invitations', [])
     invitations = [
         i for i in all_invitations
@@ -340,6 +345,14 @@ def get_or_create_detector_id(client):
         return detectors[0]
     else:
         return client.create_detector().get('DetectorId')
+
+def get_or_create_ip_set(client, detector_id, trustedIP):
+    ip_set = client.list_ip_sets(DetectorId=detector_id).get('IpSetIds')
+    if ip_set:
+        return client.update_ip_set(Activate=True, DetectorId=detector_id, IpSetId=ip_set[0], Location=trustedIP)
+    else:
+        return client.create_ip_set(Activate=True, DetectorId=detector_id, Format='TXT', Location=trustedIP, 
+        Name='EISTestIpSet').get('IpSetId')
 
 
 def get_master_info(accounts_config, master):
