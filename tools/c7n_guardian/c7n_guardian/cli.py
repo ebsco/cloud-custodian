@@ -198,14 +198,13 @@ def enable(config, master, tags, accounts, debug, message, region):
     accounts_config, master_info, executor = guardian_init(
         config, debug, master, accounts, tags)
     
-    '''
     regions = expand_regions(region)
     
     for r in regions:
         log.info("Processing Region:%s", r)
         enable_region(master_info, accounts_config, executor, message, r)
-    '''
-    enable_region(master_info, accounts_config, executor, message, 'us-east-1')
+    
+    
 
 def enable_region(master_info, accounts_config, executor, message, region):
     master_session = get_session(
