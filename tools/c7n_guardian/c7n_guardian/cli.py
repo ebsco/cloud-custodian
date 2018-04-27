@@ -344,7 +344,7 @@ def get_or_create_detector_id(client):
     if detectors:
         return detectors[0]
     else:
-        return client.create_detector().get('DetectorId')
+        return client.create_detector(Enable=True).get('DetectorId')
 
 def get_or_create_ip_set(client, detector_id, trustedIP):
     ip_set = client.list_ip_sets(DetectorId=detector_id).get('IpSetIds')
