@@ -268,7 +268,7 @@ class S3Output(FSOutput):
                 self.transfer.upload_file(
                     os.path.join(root, f), self.bucket, key,
                     extra_args={
-                        'ServerSideEncryption': 'AES256'})
+                        'ServerSideEncryption': 'AES256','ACL': 'bucket-owner-full-control'})
 
     def use_s3(self):
         return True
