@@ -352,7 +352,7 @@ def get_or_create_ip_set(client, detector_id, trustedIP):
         return client.update_ip_set(Activate=True, DetectorId=detector_id, IpSetId=ip_set[0], Location=trustedIP)
     else:
         return client.create_ip_set(Activate=True, DetectorId=detector_id, Format='TXT', Location=trustedIP, 
-        Name='EISTestIpSet').get('IpSetId')
+        Name='EISIpSet').get('IpSetId')
 
 
 def get_master_info(accounts_config, master):
