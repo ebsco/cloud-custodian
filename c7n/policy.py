@@ -451,10 +451,11 @@ class LambdaMode(PolicyExecutionMode):
         p = self.policy.data
         if 'mode' in p:
             if 'role' in p['mode']:
-                p = utils.format_string_values(p['mode']['role'], **variables)
+                p['mode']['role'] = utils.format_string_values(p['mode']['role'], **variables)
             if 'execution-options' in p['mode']:
-                if 'output_dir' in p['mode']['execution-options']:    
-                    p = utils.format_string_values(p['mode']['execution-options']['output_dir'], **variables)     
+                if 'output_dir' in p['mode']['execution-options']:
+                    p['mode']['execution-options']['output_dir'] = utils.format_string_values(
+                        p['mode']['execution-options']['output_dir'], **variables)
         return p
 
     def provision(self):
@@ -466,10 +467,9 @@ class LambdaMode(PolicyExecutionMode):
                 "Provisioning policy lambda %s", self.policy.name)
             variables = {
                 'account_id': self.policy.options.account_id,
-                'region': self.policy.options.region,
+                'region': self.policy.options.region
             }
             self.policy.data = self.expand_variables(variables)
-            log.warning(self.policy.data)
             try:
                 manager = LambdaManager(self.policy.session_factory)
             except ClientError:
