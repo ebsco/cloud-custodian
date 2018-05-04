@@ -56,4 +56,3 @@ class FrontEndIp(RelatedResourceFilter):
 
     RelatedResource = "c7n_azure.resources.public_ip.PublicIPAddress"
     RelatedIdsExpression = "properties.frontendIPConfigurations[].properties.publicIPAddress.id"
-
