@@ -139,9 +139,16 @@ class EnableQueryLogging(BaseAction):
                 log_config_id = client.list_query_logging_configs(HostedZoneId=hosted_zone_arn)
                 client.delete_query_logging_config(Id=log_config_id['QueryLoggingConfigs'][0]['Id'])
 
-def get_log_enabled_zones(client):
-    logged_zones = client.list_query_logging_configs()
-    return [hz['HostedZoneId'] for hz in logged_zones['QueryLoggingConfigs']]
+def get_log_enabled_zones(client,zonelist=[],next_token=""):
+    keyword_args = {}
+    if next_token != "":
+        keyword_args['NextToken'] = next_token
+    logged_zones = client.list_query_logging_configs(**keyword_args)
+    for hz in logged_zones['QueryLoggingConfigs']:
+        zonelist.append(hz['HostedZoneId'])
+    if 'NextToken' in logged_zones:
+        get_log_enabled_zones(client, zonelist,logged_zones['NextToken'])
+    return zonelist    
     
 def get_loggroup_arn(logs_client, log_group_name):
     log_group = logs_client.describe_log_groups(logGroupNamePrefix=log_group_name)
