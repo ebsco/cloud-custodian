@@ -162,7 +162,6 @@ def get_loggroup_arn(logs_client, log_group_name):
 class IsQueryLoggingEnabled(Filter):
 
     permissions = ('route53:GetQueryLoggingConfig','route53:GetHostedZone','route53:CreateQueryLoggingConfig',
-        'route53:UpdateHostedZoneComment',
         'route53:DeleteQueryLoggingConfig')
 
     schema = type_schema('query-logging-enabled', state={'type': 'boolean'})
@@ -184,7 +183,7 @@ class IsQueryLoggingEnabled(Filter):
                  results.append(r)
         return results
 
-####        
+    
 
 HostedZone.filter_registry.register('shield-enabled', IsShieldProtected)
 HostedZone.action_registry.register('set-shield', SetShieldProtection)
