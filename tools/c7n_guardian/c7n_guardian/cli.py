@@ -216,7 +216,7 @@ def enable_region(master_info, accounts_config, executor, message, region):
     detector_id = get_or_create_detector_id(master_client)
     ip_set = get_or_create_ip_set(master_client, detector_id, master_info.get('trustedIP'))
 
-    log.info("Region:%s master successfully uploaded ipset %d for guard duty", region, ip_set)
+    log.info("Region:%s master successfully uploaded ipset %s for guard duty", region, ip_set)
 
     results = master_client.get_paginator(
         'list_members').paginate(DetectorId=detector_id, OnlyAssociated="FALSE")
@@ -238,8 +238,8 @@ def enable_region(master_info, accounts_config, executor, message, region):
     
     if resigned_ids:
         master_client.delete_members(DetectorId=detector_id, AccountIds=list(resigned_ids))
-    log.info("Region:%s Resigned %d members are deleted from master to re-enable guard duty", region, len(resigned_ids))
-    extant_ids = extant_ids.difference(resigned_ids)
+        log.info("Region:%s Resigned %d members are deleted from master to re-enable guard duty", region, len(resigned_ids))
+        extant_ids = extant_ids.difference(resigned_ids)
 
     # Find extant members not currently enabled
     suspended_ids = {m['AccountId'] for m in extant_members
