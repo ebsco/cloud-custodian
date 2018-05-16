@@ -216,6 +216,8 @@ def enable_region(master_info, accounts_config, executor, message, region):
     detector_id = get_or_create_detector_id(master_client)
     ip_set = get_or_create_ip_set(master_client, detector_id, master_info.get('trustedIP'))
 
+    log.info("Region:%s master successfully uploaded ipset %d for guard duty", region, ip_set)
+
     results = master_client.get_paginator(
         'list_members').paginate(DetectorId=detector_id, OnlyAssociated="FALSE")
     extant_members = results.build_full_result().get('Members', ())
@@ -227,6 +229,17 @@ def enable_region(master_info, accounts_config, executor, message, region):
     # Find invited members
     invited_ids = {m['AccountId'] for m in extant_members
                        if m['RelationshipStatus'] == 'Invited'}
+    # Find extant members currently have guardduty disabled(removed)
+    resigned_ids = {m['AccountId'] for m in extant_members
+                       if m['RelationshipStatus'] == 'Resigned'}
+
+    resigned_ids = {a['account_id'] for a in accounts_config['accounts']
+                     if a['account_id'] in resigned_ids}    
+    
+    if resigned_ids:
+        master_client.delete_members(DetectorId=detector_id, AccountIds=list(resigned_ids))
+    log.info("Region:%s Resigned %d members are deleted from master to re-enable guard duty", region, len(resigned_ids))
+    extant_ids = extant_ids.difference(resigned_ids)
 
     # Find extant members not currently enabled
     suspended_ids = {m['AccountId'] for m in extant_members
@@ -350,7 +363,8 @@ def get_or_create_detector_id(client):
 def get_or_create_ip_set(client, detector_id, trustedIP):
     ip_set = client.list_ip_sets(DetectorId=detector_id).get('IpSetIds')
     if ip_set:
-        return client.update_ip_set(Activate=True, DetectorId=detector_id, IpSetId=ip_set[0], Location=trustedIP)
+        client.update_ip_set(Activate=True, DetectorId=detector_id, IpSetId=ip_set[0], Location=trustedIP)
+        return ip_set
     else:
         return client.create_ip_set(Activate=True, DetectorId=detector_id, Format='TXT', Location=trustedIP, 
         Name='EISIpSet').get('IpSetId')
