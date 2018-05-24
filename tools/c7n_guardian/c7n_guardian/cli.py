@@ -367,7 +367,7 @@ def get_or_create_ip_set(client, detector_id, trustedIP):
         return ip_set
     else:
         return client.create_ip_set(Activate=True, DetectorId=detector_id, Format='TXT', Location=trustedIP, 
-        Name='EISIpSet').get('IpSetId')
+        Name='IpSet').get('IpSetId')
 
 
 def get_master_info(accounts_config, master):
