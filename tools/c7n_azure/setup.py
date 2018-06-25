@@ -18,6 +18,7 @@ setup(
     name="c7n_azure",
     version='0.1',
     description="Cloud Custodian - Azure Support",
+    include_package_data=True,
     classifiers=[
         "Topic :: System :: Systems Administration",
         "Topic :: System :: Distributed Computing"
@@ -31,5 +32,12 @@ setup(
         "custodian.resources": [
             'azure = c7n_azure.entry:initialize_azure']
     },
-    install_requires=["c7n", "click", "azure", "azure-cli-core", "adal"]
+    install_requires=["azure",
+                      "c7n",
+                      "click",
+                      "azure-cli-core",
+                      "adal~=0.5.0",
+                      "backports.functools_lru_cache",
+                      "futures==3.1.1"],
+
 )

@@ -11,12 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Base GCP client which uses the discovery API."""
+"""Base GCP client which uses the discovery API.
+"""
+# modifications (c7n)
+# - flight recorder support
+# - env creds sourcing
+# - various minor bug fixes
+
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 import logging
 import threading
 from googleapiclient import discovery
 import httplib2
 from oauth2client import client
+import os
 from ratelimiter import RateLimiter
 from retrying import retry
 import socket
@@ -69,7 +78,7 @@ def is_retryable_exception(e):
        wait_exponential_max=10000,
        stop_max_attempt_number=5)
 def _create_service_api(credentials, service_name, version, developer_key=None,
-                        cache_discovery=False):
+                        cache_discovery=False, http=None):
     """Builds and returns a cloud API service object.
 
     Args:
@@ -96,7 +105,13 @@ def _create_service_api(credentials, service_name, version, developer_key=None,
         'version': version,
         'developerKey': developer_key,
         'cache_discovery': cache_discovery,
-        'credentials': credentials}
+    }
+
+    if http:
+        discovery_kwargs['http'] = http
+    else:
+        discovery_kwargs['credentials'] = credentials
+
     return discovery.build(**discovery_kwargs)
 
 
@@ -131,6 +146,8 @@ class Session(object):
                  quota_max_calls=None,
                  quota_period=None,
                  use_rate_limiter=False,
+                 http=None,
+                 project_id=None,
                  **kwargs):
         """Constructor.
 
@@ -157,6 +174,9 @@ class Session(object):
                                              period=quota_period)
         else:
             self._rate_limiter = None
+        self._http = http
+
+        self.project_id = project_id
 
     def __repr__(self):
         """The object representation.
@@ -164,8 +184,25 @@ class Session(object):
         Returns:
             str: The object representation.
         """
-        return '<GCPSession: name=%s, versions=%s>' % (
-            self.name, self.versions)
+        return '<gcp-session: http=%s>' % (self._http,)
+
+    def get_default_project(self):
+        if self.project_id:
+            return self.project_id
+        for k in ('GOOGLE_PROJECT', 'GCLOUD_PROJECT', 'CLOUDSDK_CORE_PROJECT'):
+            if k in os.environ:
+                return os.environ[k]
+        raise ValueError("No GCP Project ID set - set CLOUDSDK_CORE_PROJECT")
+
+    def get_default_region(self):
+        for k in ('GOOGLE_REGION', 'GCLOUD_REGION', 'CLOUDSDK_COMPUTE_REGION'):
+            if k in os.environ:
+                return os.environ[k]
+
+    def get_default_zone(self):
+        for k in ('GOOGLE_ZONE', 'GCLOUD_ZONE', 'CLOUDSDK_COMPUTE_ZONE'):
+            if k in os.environ:
+                return os.environ[k]
 
     def client(self, service_name, version, component, **kw):
         """Safely initialize a repository class to a property.
@@ -177,20 +214,21 @@ class Session(object):
         Returns:
             object: An instance of repository_class.
         """
-
         service = _create_service_api(
             self._credentials,
             service_name,
             version,
             kw.get('developer_key'),
-            kw.get('cache_discovery', False))
+            kw.get('cache_discovery', False),
+            self._http)
 
         return ServiceClient(
             gcp_service=service,
             component=component,
             credentials=self._credentials,
             rate_limiter=self._rate_limiter,
-            use_cached_http=self._use_cached_http)
+            use_cached_http=self._use_cached_http,
+            http=self._http)
 
 
 # pylint: disable=too-many-instance-attributes, too-many-arguments
@@ -201,7 +239,7 @@ class ServiceClient(object):
                  num_retries=NUM_HTTP_RETRIES, key_field='project',
                  entity_field=None, list_key_field=None, get_key_field=None,
                  max_results_field='maxResults', search_query_field='query',
-                 rate_limiter=None, use_cached_http=True):
+                 rate_limiter=None, use_cached_http=True, http=None):
         """Constructor.
 
         Args:
@@ -256,6 +294,7 @@ class ServiceClient(object):
 
         self._use_cached_http = use_cached_http
         self._local = LOCAL_THREAD
+        self._http_replay = http
 
     @property
     def http(self):
@@ -265,6 +304,11 @@ class ServiceClient(object):
             httplib2.Http: An Http instance authorized by the credentials.
         """
         if self._use_cached_http and hasattr(self._local, 'http'):
+            return self._local.http
+        if self._http_replay is not None:
+            # httplib2 instance is not thread safe.
+            self._credentials.authorize(http=self._http_replay)
+            self._local.http = self._http_replay
             return self._local.http
 
         http = httplib2.Http(timeout=HTTP_REQUEST_TIMEOUT)
@@ -331,8 +375,7 @@ class ServiceClient(object):
 
         Args:
             verb (str): Method to execute on the component (ex. get, list).
-            verb_arguments (dict): key-value pairs to be passed to
-                _build_request.
+            verb_arguments (dict): key-value pairs to be passed to _build_request.
 
         Returns:
             dict: An async operation Service Response.
@@ -345,8 +388,7 @@ class ServiceClient(object):
 
         Args:
             verb (str): Method to execute on the component (ex. get, list).
-            verb_arguments (dict): key-value pairs to be passed to
-                _BuildRequest.
+            verb_arguments (dict): key-value pairs to be passed to _BuildRequest.
 
         Yields:
             dict: Service Response.
@@ -372,8 +414,7 @@ class ServiceClient(object):
 
         Args:
             verb (str): Method to execute on the component (ex. search).
-            verb_arguments (dict): key-value pairs to be passed to
-                _BuildRequest.
+            verb_arguments (dict): key-value pairs to be passed to _BuildRequest.
 
         Yields:
             dict: Service Response.
@@ -401,8 +442,7 @@ class ServiceClient(object):
 
         Args:
             verb (str): Method to execute on the component (ex. get, list).
-            verb_arguments (dict): key-value pairs to be passed to
-                _BuildRequest.
+            verb_arguments (dict): key-value pairs to be passed to _BuildRequest.
 
         Returns:
             dict: Service Response.

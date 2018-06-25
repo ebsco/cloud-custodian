@@ -27,8 +27,9 @@ import itertools
 import time
 
 from c7n.actions import Action, ActionRegistry
+from c7n.exceptions import PolicyValidationError
 from c7n.filters import (
-    FilterRegistry, ValueFilter, AgeFilter, Filter, FilterValidationError,
+    FilterRegistry, ValueFilter, AgeFilter, Filter,
     OPERATORS)
 from c7n.filters.offhours import OffHour, OnHour, Time
 import c7n.filters.vpc as net_filters
@@ -194,7 +195,7 @@ class ConfigValidFilter(Filter, LaunchConfigFilterBase):
 
     def validate(self):
         if self.manager.data.get('mode'):
-            raise FilterValidationError(
+            raise PolicyValidationError(
                 "invalid-config makes too many queries to be run in lambda")
         return self
 
@@ -527,7 +528,7 @@ class NotEncryptedFilter(Filter, LaunchConfigFilterBase):
 
     def get_snapshots(self, ec2, snap_ids):
         """get snapshots corresponding to id, but tolerant of invalid id's."""
-        while True:
+        while snap_ids:
             try:
                 result = ec2.describe_snapshots(SnapshotIds=snap_ids)
             except ClientError as e:
@@ -538,6 +539,7 @@ class NotEncryptedFilter(Filter, LaunchConfigFilterBase):
                 raise
             else:
                 return result.get('Snapshots', ())
+        return ()
 
     @staticmethod
     def get_bad_snapshot(e):
@@ -898,12 +900,6 @@ class Resize(Action):
         'autoscaling:UpdateAutoScalingGroup',
         'autoscaling:CreateOrUpdateTags'
     )
-
-    def validate(self):
-        # if self.data['desired_size'] != 'current':
-        #    raise FilterValidationError(
-        #        "only resizing desired/min to current capacity is supported")
-        return self
 
     def process(self, asgs):
         # ASG parameters to save to/restore from a tag
@@ -1357,8 +1353,8 @@ class MarkForOp(Tag):
         self.tz = zoneinfo.gettz(
             Time.TZ_ALIASES.get(self.data.get('tz', 'utc')))
         if not self.tz:
-            raise FilterValidationError(
-                "Invalid timezone specified %s" % self.tz)
+            raise PolicyValidationError(
+                "Invalid timezone specified %s on %s" % (self.tz, self.manager.data))
         return self
 
     def process(self, asgs):

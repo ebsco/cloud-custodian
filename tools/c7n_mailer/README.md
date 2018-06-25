@@ -136,6 +136,7 @@ policies:
           - slack://owners
           - slack://foo@bar.com
           - slack://#custodian-test
+          - slack://webhook/#c7n-webhook-test
         transport:
           type: sqs
           queue: https://sqs.us-east-1.amazonaws.com/1234567890/c7n-mailer-test
@@ -143,17 +144,20 @@ policies:
 
 Slack messages support use of a unique template field specified by `slack_template`. This field is unique and usage will not break
 existing functionality for messages also specifying an email template in the `template` field. This field is optional, however,
-and if not specified, the mailer will use the default value `slack_default`. 
+and if not specified, the mailer will use the default value `slack_default`.
 
 Slack integration for the mailer supports three flavors of messaging, listed below. These are not mutually exclusive and any combination of the types can be used.
- 
+
 | Required? | Key                  | Type             | Notes                               |
 |:---------:|:---------------------|:-----------------|:------------------------------------|
 |           | `slack://owners`          | string      | Send to the recipient list generated within email delivery logic |
 |           | `slack://foo@bar.com`     | string      | Send to the recipient specified by email address foo@bar.com |
-|           | `slack://#custodian-test` | string      | Send to the Slack channel indicated in string, i.e. #custodian-test | 
- 
- 
+|           | `slack://#custodian-test` | string      | Send to the Slack channel indicated in string, i.e. #custodian-test |
+|           | `slack://webhook/#c7n-webhook-test` | string      | Send to a Slack webhook; appended with the target channel. |
+
+
+The `slack_token` field is required for any of the first three Slack notify forms. However, a token is not required for use of the webhook.
+
 ### Now run:
 
 ```
@@ -261,6 +265,13 @@ These fields are not necessary if c7n_mailer is run in a instance/lambda/etc wit
 |:---------:|:--------------------------|:-----------------|:------------------------------------|
 |           | `slack_token`             | string           | Slack API token |
 
+#### SendGrid Config
+
+| Required? | Key                       | Type             | Notes                               |
+|:---------:|:--------------------------|:-----------------|:------------------------------------|
+|           | `sendgrid_api_key`        | string           | SendGrid API token |
+SendGrid is only supported for Azure Cloud use with Azure Storage Queue currently.
+
 #### SDK Config
 
 | Required? | Key                  | Type             | Notes                               |
@@ -344,6 +355,45 @@ For reference purposes, the JSON Schema of the `notify` action:
 }
 ```
 
+## Using on Azure
+
+Requires `c7n_azure` package.  See [Installing Azure Plugin](http://capitalone.github.io/cloud-custodian/docs/azure/gettingstarted.html#install-cloud-custodian)
+
+The mailer supports an Azure Storage Queue transport and SendGrid delivery on Azure.  
+Configuration for this scenario requires only minor changes from AWS deployments.
+
+The notify action in your policy will reflect transport type `asq` with the URL
+to an Azure Storage Queue.  For example:
+
+```json
+policies:
+  - name: azure-notify
+    resource: azure.resourcegroup
+    description: example policy
+    actions:
+      - type: notify
+        template: default
+        priority_header: '2'
+        subject: Hello from C7N Mailer
+        to:
+          - you@youremail.com
+        transport:
+          type: asq
+          queue: https://storageaccount.queue.core.windows.net/queuename
+```
+
+In your mailer configuration, you'll need to provide your SendGrid API key as well as
+prefix your queue URL with `asq://` to let mailer know what type of queue it is:
+
+```yml
+queue_url: asq://storageaccount.queue.core.windows.net/queuename
+from_address: you@youremail.com
+sendgrid_api_key: SENDGRID_API_KEY
+```
+
+The mailer will transmit all messages found on the queue on each execution, and will retry
+sending 3 times in the event of a failure calling SendGrid.  After the retries the queue
+message will be discarded.
 
 ## Writing an email template
 
@@ -370,8 +420,7 @@ The following extra global functions are available:
 | signature | behavior |
 |:----------|:-----------|
 | `format_struct(struct)` | pretty print a json structure |
-| `resource_tag(resource, key)` | retrieve a tag value from a resource or return an empty string |
-| `resource_owner(resource)` | retrieve the contact field value for a resource from tags, if not found returns `Unknown` |
+| `resource_tag(resource, key)` | retrieve a tag value from a resource or return an empty string, aliased as get_resource_tag_value |
 | `format_resource(resource, resource_type)` | renders a one line summary of a resource |
 
 The following extra jinja filters are available:

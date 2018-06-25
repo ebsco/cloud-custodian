@@ -18,33 +18,34 @@ import datetime
 from azure.mgmt.resource.resources.models import GenericResource, ResourceGroupPatchable
 from msrestazure.azure_exceptions import CloudError
 from c7n import utils
-from c7n.actions import BaseAction
+from c7n_azure.utils import utcnow
+from c7n.actions import BaseAction, BaseNotify
 from c7n.filters import FilterValidationError
+from c7n.resolver import ValuesFrom
+from c7n_azure.storage_utils import StorageUtilities
 
 
-def utcnow():
-    """The datetime object for the current time in UTC
-    """
-    return datetime.datetime.utcnow()
+def update_resource_tags(self, resource, tags):
 
-
-def update_resource_tags(self, session, client, resource, tags):
     # resource group type
     if self.manager.type == 'resourcegroup':
         params_patch = ResourceGroupPatchable(
             tags=tags
         )
-        client.resource_groups.update(
+        self.client.resource_groups.update(
             resource['name'],
             params_patch,
         )
     # other Azure resources
     else:
+        if self.manager.type == 'armresource':
+            raise NotImplementedError('Cannot tag generic ARM resources.')
+
         az_resource = GenericResource.deserialize(resource)
-        api_version = session.resource_api_version(az_resource.id)
+        api_version = self.session.resource_api_version(az_resource.id)
         az_resource.tags = tags
 
-        client.resources.create_or_update_by_id(resource['id'], api_version, az_resource)
+        self.client.resources.create_or_update_by_id(resource['id'], api_version, az_resource)
 
 
 class Tag(BaseAction):
@@ -72,6 +73,11 @@ class Tag(BaseAction):
         }
     )
 
+    def __init__(self, data=None, manager=None, log_dir=None):
+        super(Tag, self).__init__(data, manager, log_dir)
+        self.session = utils.local_session(self.manager.session_factory)
+        self.client = self.manager.get_client('azure.mgmt.resource.ResourceManagementClient')
+
     def validate(self):
         if not self.data.get('tags') and not (self.data.get('tag') and self.data.get('value')):
             raise FilterValidationError(
@@ -84,19 +90,19 @@ class Tag(BaseAction):
         return self
 
     def process(self, resources):
-        session = utils.local_session(self.manager.session_factory)
-        client = self.manager.get_client('azure.mgmt.resource.ResourceManagementClient')
+        with self.executor_factory(max_workers=3) as w:
+            list(w.map(self.process_resource, resources))
 
-        for resource in resources:
-            # get existing tags
-            tags = resource.get('tags', {})
+    def process_resource(self, resource):
+        # get existing tags
+        tags = resource.get('tags', {})
 
-            # add or update tags
-            new_tags = self.data.get('tags') or {self.data.get('tag'): self.data.get('value')}
-            for key in new_tags:
-                tags[key] = new_tags[key]
+        # add or update tags
+        new_tags = self.data.get('tags') or {self.data.get('tag'): self.data.get('value')}
+        for key in new_tags:
+            tags[key] = new_tags[key]
 
-            update_resource_tags(self, session, client, resource, tags)
+        update_resource_tags(self, resource, tags)
 
 
 class RemoveTag(BaseAction):
@@ -117,25 +123,29 @@ class RemoveTag(BaseAction):
         'untag',
         tags={'type': 'array', 'items': {'type': 'string'}})
 
+    def __init__(self, data=None, manager=None, log_dir=None):
+        super(RemoveTag, self).__init__(data, manager, log_dir)
+        self.session = utils.local_session(self.manager.session_factory)
+        self.client = self.manager.get_client('azure.mgmt.resource.ResourceManagementClient')
+
     def validate(self):
         if not self.data.get('tags'):
             raise FilterValidationError("Must specify tags")
         return self
 
     def process(self, resources):
-        session = utils.local_session(self.manager.session_factory)
-        client = self.manager.get_client('azure.mgmt.resource.ResourceManagementClient')
+        with self.executor_factory(max_workers=3) as w:
+            list(w.map(self.process_resource, resources))
 
-        for resource in resources:
-            # get existing tags
-            tags = resource.get('tags', {})
+    def process_resource(self, resource):
+        # get existing tags
+        tags = resource.get('tags', {})
 
-            # delete tag
-            tags_to_delete = self.data.get('tags')
-            for key in tags_to_delete:
-                tags.pop(key, None)
+        # delete tag
+        tags_to_delete = self.data.get('tags')
+        resource_tags = {key: tags[key] for key in tags if key not in tags_to_delete}
 
-            update_resource_tags(self, session, client, resource, tags)
+        update_resource_tags(self, resource, resource_tags)
 
 
 class AutoTagUser(BaseAction):
@@ -173,6 +183,8 @@ class AutoTagUser(BaseAction):
         super(AutoTagUser, self).__init__(data, manager, log_dir)
         delta_days = self.data.get('days', self.max_query_days)
         self.start_time = utcnow() - datetime.timedelta(days=delta_days)
+        self.client = self.manager.get_client('azure.mgmt.monitor.MonitorManagementClient')
+        self.tag_action = self.manager.action_registry.get('tag')
 
     def validate(self):
         if self.manager.action_registry.get('tag') is None:
@@ -185,61 +197,214 @@ class AutoTagUser(BaseAction):
         return self
 
     def process(self, resources):
-        client = self.manager.get_client('azure.mgmt.monitor.MonitorManagementClient')
-        tag_action = self.manager.action_registry.get('tag')
-        tag_key = self.data['tag']
-        should_update = self.data.get('update', False)
+        self.tag_key = self.data['tag']
+        self.should_update = self.data.get('update', False)
+        with self.executor_factory(max_workers=3) as w:
+            list(w.map(self.process_resource, resources))
 
-        for resource in resources:
-            # if the auto-tag-user policy set update to False (or it's unset) then we
-            # will skip writing their UserName tag and not overwrite pre-existing values
-            if not should_update and resource.get('tags', {}).get(tag_key, None):
-                continue
+    def process_resource(self, resource):
+        # if the auto-tag-user policy set update to False (or it's unset) then we
+        # will skip writing their UserName tag and not overwrite pre-existing values
+        if not self.should_update and resource.get('tags', {}).get(self.tag_key, None):
+            return
 
-            user = self.default_user
+        user = self.default_user
 
-            # resource group type
-            if self.manager.type == 'resourcegroup':
-                resource_type = "Microsoft.Resources/subscriptions/resourcegroups"
-                query_filter = " and ".join([
-                    "eventTimestamp ge '%s'" % self.start_time,
-                    "resourceGroupName eq '%s'" % resource['name'],
-                    "eventChannels eq 'Operation'"
-                ])
-            # other Azure resources
-            else:
-                resource_type = resource['type']
-                query_filter = " and ".join([
-                    "eventTimestamp ge '%s'" % self.start_time,
-                    "resourceUri eq '%s'" % resource['id'],
-                    "eventChannels eq 'Operation'"
-                ])
+        # resource group type
+        if self.manager.type == 'resourcegroup':
+            resource_type = "Microsoft.Resources/subscriptions/resourcegroups"
+            query_filter = " and ".join([
+                "eventTimestamp ge '%s'" % self.start_time,
+                "resourceGroupName eq '%s'" % resource['name'],
+                "eventChannels eq 'Operation'"
+            ])
+        # other Azure resources
+        else:
+            resource_type = resource['type']
+            query_filter = " and ".join([
+                "eventTimestamp ge '%s'" % self.start_time,
+                "resourceUri eq '%s'" % resource['id'],
+                "eventChannels eq 'Operation'"
+            ])
 
-            # fetch activity logs
-            logs = client.activity_logs.list(
-                filter=query_filter,
-                select=self.query_select
-            )
+        # fetch activity logs
+        logs = self.client.activity_logs.list(
+            filter=query_filter,
+            select=self.query_select
+        )
 
-            # get the user who issued the first operation
-            operation_name = "%s/write" % resource_type
-            first_op = self.get_first_operation(logs, operation_name)
-            if first_op is not None:
-                user = first_op.caller
+        # get the user who issued the first operation
+        operation_name = "%s/write" % resource_type
+        first_op = self.get_first_operation(logs, operation_name)
+        if first_op is not None:
+            user = first_op.caller
 
-            # issue tag action to label user
-            try:
-                tag_action({'tag': tag_key, 'value': user}, self.manager).process([resource])
-            except CloudError as e:
-                # resources can be locked
-                if e.inner_exception.error == 'ScopeLocked':
-                    pass
+        # issue tag action to label user
+        try:
+            self.tag_action({'tag': self.tag_key, 'value': user}, self.manager).process([resource])
+        except CloudError as e:
+            # resources can be locked
+            if e.inner_exception.error == 'ScopeLocked':
+                pass
 
     @staticmethod
     def get_first_operation(logs, operation_name):
         first_operation = None
         for l in logs:
-            if l.operation_name.value == operation_name:
+            if l.operation_name.value.lower() == operation_name.lower():
                 first_operation = l
 
         return first_operation
+
+
+class TagTrim(BaseAction):
+    """Automatically remove tags from an azure resource.
+
+    Azure Resources and Resource Groups have a limit of 15 tags.
+    In order to make additional tag space on a set of resources,
+    this action can be used to remove enough tags to make the
+    desired amount of space while preserving a given set of tags.
+    Setting the space value to 0 removes all tags but those
+    listed to preserve.
+
+    .. code-block :: yaml
+
+      - policies:
+         - name: azure-tag-trim
+           comment: |
+             Any instances with 14 or more tags get tags removed until
+             they match the target tag count, in this case 13, so
+             that we free up tag slots for another usage.
+           resource: azure.resourcegroup
+           filters:
+               # Filter down to resources that do not have the space
+               # to add additional required tags. For example, if an
+               # additional 2 tags need to be added to a resource, with
+               # 15 tags as the limit, then filter down to resources that
+               # have 14 or more tags since they will need to have tags
+               # removed for the 2 extra. This also ensures that metrics
+               # reporting is correct for the policy.
+               type: value
+               key: "[length(Tags)][0]"
+               op: ge
+               value: 14
+           actions:
+             - type: tag-trim
+               space: 2
+               preserve:
+                - OwnerContact
+                - Environment
+                - downtime
+                - custodian_status
+    """
+    max_tag_count = 15
+
+    schema = utils.type_schema(
+        'tag-trim',
+        space={'type': 'integer'},
+        preserve={'type': 'array', 'items': {'type': 'string'}})
+
+    def __init__(self, data=None, manager=None, log_dir=None):
+        super(TagTrim, self).__init__(data, manager, log_dir)
+        self.untag_action = self.manager.action_registry.get('untag')
+
+    def validate(self):
+        if self.data.get('space') < 0 or self.data.get('space') > 15:
+            raise FilterValidationError("Space must be between 0 and 15")
+
+        return self
+
+    def process(self, resources):
+        self.preserve = set(self.data.get('preserve', {}))
+        self.space = self.data.get('space', 1)
+
+        with self.executor_factory(max_workers=3) as w:
+            list(w.map(self.process_resource, resources))
+
+    def process_resource(self, resource):
+        # get existing tags
+        tags = resource.get('tags', {})
+
+        if self.space and len(tags) + self.space <= self.max_tag_count:
+            return
+
+        # delete tags
+        keys = set(tags)
+        tags_to_preserve = self.preserve.intersection(keys)
+        candidates = keys - tags_to_preserve
+
+        if self.space:
+            # Free up slots to fit
+            remove = len(candidates) - (
+                self.max_tag_count - (self.space + len(tags_to_preserve)))
+            candidates = list(sorted(candidates))[:remove]
+
+        if not candidates:
+            self.log.warning(
+                "Could not find any candidates to trim %s" % resource['id'])
+            return
+
+        self.untag_action({'tags': candidates}, self.manager).process([resource])
+
+
+class Notify(BaseNotify):
+
+    batch_size = 50
+
+    schema = {
+        'type': 'object',
+        'anyOf': [
+            {'required': ['type', 'transport', 'to']},
+            {'required': ['type', 'transport', 'to_from']}],
+        'properties': {
+            'type': {'enum': ['notify']},
+            'to': {'type': 'array', 'items': {'type': 'string'}},
+            'owner_absent_contact': {'type': 'array', 'items': {'type': 'string'}},
+            'to_from': ValuesFrom.schema,
+            'cc': {'type': 'array', 'items': {'type': 'string'}},
+            'cc_from': ValuesFrom.schema,
+            'cc_manager': {'type': 'boolean'},
+            'from': {'type': 'string'},
+            'subject': {'type': 'string'},
+            'template': {'type': 'string'},
+            'transport': {
+                'oneOf': [
+                    {'type': 'object',
+                     'required': ['type', 'queue'],
+                     'properties': {
+                         'queue': {'type': 'string'},
+                         'type': {'enum': ['asq']}
+                     }}],
+            },
+        }
+    }
+
+    def __init__(self, data=None, manager=None, log_dir=None):
+        super(Notify, self).__init__(data, manager, log_dir)
+
+    def process(self, resources, event=None):
+        session = utils.local_session(self.manager.session_factory)
+        message = {
+            'event': event,
+            'account_id': session.subscription_id,
+            'account': session.subscription_id,
+            'region': 'all',
+            'policy': self.manager.data}
+
+        message['action'] = self.expand_variables(message)
+
+        for batch in utils.chunks(resources, self.batch_size):
+            message['resources'] = batch
+            receipt = self.send_data_message(message)
+            self.log.info("sent message:%s policy:%s template:%s count:%s" % (
+                receipt, self.manager.data['name'],
+                self.data.get('template', 'default'), len(batch)))
+
+    def send_data_message(self, message):
+        if self.data['transport']['type'] == 'asq':
+            queue_uri = self.data['transport']['queue']
+            return self.send_to_azure_queue(queue_uri, message)
+
+    def send_to_azure_queue(self, queue_uri, message):
+        queue_service, queue_name = StorageUtilities.get_queue_client_by_uri(queue_uri)
+        return StorageUtilities.put_queue_message(queue_service, queue_name, self.pack(message)).id
